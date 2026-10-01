@@ -39,6 +39,8 @@ starts a fresh one for the next message.
 ## Build
 
 ```nix
+inputs.obs-twitch-tts.url = "github:y0usaf/obs-twitch-tts";
+
 pkgs.wrapOBS { plugins = [ obs-twitch-tts.packages.${system}.default ]; }
 ```
 
