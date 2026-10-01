@@ -6,7 +6,6 @@
 
 #include <ctype.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <netdb.h>
 #include <poll.h>
 #include <signal.h>
@@ -18,6 +17,7 @@
 
 #define NS 1000000000ULL
 #define LEAD (NS / 20)
+#define BUDGET (30 * NS)
 
 OBS_DECLARE_MODULE()
 
@@ -28,92 +28,126 @@ struct tts {
 	pthread_t thread;
 	pthread_mutex_t lock;
 	char *channel;
+	char *model;
+	long long speaker;
 	volatile long gen;
 	volatile bool stop;
 };
 
-static bool halted(struct tts *t, long gen)
+struct run {
+	struct tts *t;
+	long gen;
+	char *channel;
+	char *model;
+	long long speaker;
+	pid_t pid;
+	int voice;
+};
+
+static bool halted(struct run *r)
 {
-	return os_atomic_load_bool(&t->stop) || os_atomic_load_long(&t->gen) != gen;
+	return os_atomic_load_bool(&r->t->stop) || os_atomic_load_long(&r->t->gen) != r->gen;
 }
 
-static void play(struct tts *t, long gen, const uint8_t *pcm, size_t frames, uint32_t rate)
+static bool voice_start(struct run *r)
+{
+	int sv[2];
+	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv))
+		return false;
+	posix_spawn_file_actions_t fa;
+	posix_spawn_file_actions_init(&fa);
+	posix_spawn_file_actions_adddup2(&fa, sv[1], STDIN_FILENO);
+	posix_spawn_file_actions_adddup2(&fa, sv[1], STDOUT_FILENO);
+	char speaker[24];
+	snprintf(speaker, sizeof(speaker), "%lld", r->speaker);
+	char *argv[] = {SAY, r->model, speaker, NULL};
+	int err = posix_spawn(&r->pid, SAY, &fa, NULL, argv, environ);
+	posix_spawn_file_actions_destroy(&fa);
+	close(sv[1]);
+	if (err) {
+		close(sv[0]);
+		r->pid = 0;
+		blog(LOG_WARNING, "[twitch-tts] %s: %s", SAY, strerror(err));
+		return false;
+	}
+	r->voice = sv[0];
+	return true;
+}
+
+static void voice_stop(struct run *r)
+{
+	if (!r->pid)
+		return;
+	kill(r->pid, SIGKILL);
+	waitpid(r->pid, NULL, 0);
+	close(r->voice);
+	r->pid = 0;
+}
+
+static bool recv_all(struct run *r, void *buf, size_t n, uint64_t deadline)
+{
+	struct pollfd p = {.fd = r->voice, .events = POLLIN};
+	for (size_t got = 0; got < n;) {
+		if (halted(r) || os_gettime_ns() > deadline)
+			return false;
+		if (poll(&p, 1, 100) <= 0)
+			continue;
+		ssize_t k = recv(r->voice, (char *)buf + got, n - got, 0);
+		if (k <= 0)
+			return false;
+		got += (size_t)k;
+	}
+	return true;
+}
+
+static void play(struct run *r, const float *pcm, size_t frames, uint32_t rate)
 {
 	size_t chunk = rate / 50, off = 0;
 	uint64_t start = os_gettime_ns();
-	for (; off < frames && !halted(t, gen); off += chunk) {
+	for (; off < frames && !halted(r); off += chunk) {
 		uint64_t ts = start + off * NS / rate;
 		os_sleepto_ns(ts);
 		struct obs_source_audio a = {
-			.data = {pcm + off * 2},
+			.data = {(const uint8_t *)(pcm + off)},
 			.frames = (uint32_t)(frames - off < chunk ? frames - off : chunk),
 			.speakers = SPEAKERS_MONO,
-			.format = AUDIO_FORMAT_16BIT,
+			.format = AUDIO_FORMAT_FLOAT,
 			.samples_per_sec = rate,
 			.timestamp = ts + LEAD,
 		};
-		obs_source_output_audio(t->source, &a);
+		obs_source_output_audio(r->t->source, &a);
 	}
 	os_sleepto_ns(start + (off < frames ? off : frames) * NS / rate);
 }
 
-static void say(struct tts *t, long gen, const char *text)
+static void say(struct run *r, const char *text)
 {
-	int out[2];
-	if (pipe2(out, O_CLOEXEC))
+	if (!r->pid && !voice_start(r))
 		return;
-	posix_spawn_file_actions_t fa;
-	posix_spawn_file_actions_init(&fa);
-	posix_spawn_file_actions_adddup2(&fa, out[1], STDOUT_FILENO);
-	char *argv[] = {"flite", "-voice", "slt", "-o", "/dev/stdout", "-t", (char *)text, NULL};
-	pid_t pid;
-	int err = posix_spawn(&pid, FLITE, &fa, NULL, argv, environ);
-	posix_spawn_file_actions_destroy(&fa);
-	close(out[1]);
-	if (err) {
-		close(out[0]);
-		blog(LOG_WARNING, "[twitch-tts] %s: %s", FLITE, strerror(err));
+	struct dstr line = {0};
+	dstr_printf(&line, "%s\n", text);
+	bool sent = send(r->voice, line.array, line.len, MSG_NOSIGNAL) == (ssize_t)line.len;
+	dstr_free(&line);
+
+	uint32_t head[2];
+	uint64_t deadline = os_gettime_ns() + BUDGET;
+	if (!sent || !recv_all(r, head, sizeof(head), deadline)) {
+		if (!halted(r))
+			blog(LOG_WARNING, "[twitch-tts] %s died or took over 30s; restarting it", SAY);
+		voice_stop(r);
 		return;
 	}
-
-	uint8_t *wav = NULL;
-	size_t len = 0, cap = 0;
-	uint64_t deadline = os_gettime_ns() + 10 * NS;
-	struct pollfd p = {.fd = out[0], .events = POLLIN};
-	for (;;) {
-		if (halted(t, gen) || os_gettime_ns() > deadline) {
-			kill(pid, SIGKILL);
-			len = 0;
-			break;
-		}
-		if (poll(&p, 1, 100) <= 0)
-			continue;
-		if (len == cap)
-			wav = brealloc(wav, cap = cap ? cap * 2 : 1 << 16);
-		ssize_t n = read(out[0], wav + len, cap - len);
-		if (n <= 0)
-			break;
-		len += (size_t)n;
-	}
-	close(out[0]);
-	waitpid(pid, NULL, 0);
-
-	uint16_t channels = 0, bits = 0;
-	uint32_t rate = 0;
-	if (len > 44) {
-		memcpy(&channels, wav + 22, 2);
-		memcpy(&rate, wav + 24, 4);
-		memcpy(&bits, wav + 34, 2);
-	}
-	if (len > 44 && !memcmp(wav, "RIFF", 4) && !memcmp(wav + 36, "data", 4) && channels == 1 && bits == 16 &&
-	    rate >= 1000)
-		play(t, gen, wav + 44, (len - 44) / 2, rate);
-	else if (!halted(t, gen))
-		blog(LOG_WARNING, "[twitch-tts] flite gave no 16-bit mono wav");
-	bfree(wav);
+	if (!head[0] || !head[1])
+		return;
+	float *pcm = bmalloc((size_t)head[1] * sizeof(float));
+	if (recv_all(r, pcm, (size_t)head[1] * sizeof(float), deadline))
+		play(r, pcm, head[1], head[0]);
+	else
+		voice_stop(r);
+	bfree(pcm);
 }
 
-static void line(struct tts *t, long gen, int fd, char *l)
+static void line(struct run *r, int fd, char *l)
 {
 	if (!strncmp(l, "PING ", 5)) {
 		l[1] = 'O';
@@ -129,7 +163,7 @@ static void line(struct tts *t, long gen, int fd, char *l)
 	*bang = '\0';
 	struct dstr text = {0};
 	dstr_printf(&text, "%s says %s", l + 1, msg + 2);
-	say(t, gen, text.array);
+	say(r, text.array);
 	dstr_free(&text);
 }
 
@@ -153,7 +187,7 @@ static int dial(void)
 	return fd;
 }
 
-static void session(struct tts *t, long gen, const char *channel)
+static void session(struct run *r)
 {
 	int fd = dial();
 	if (fd < 0) {
@@ -161,14 +195,15 @@ static void session(struct tts *t, long gen, const char *channel)
 		return;
 	}
 	struct dstr hello = {0};
-	dstr_printf(&hello, "NICK justinfan12345\r\nJOIN #%s\r\n", channel);
+	dstr_printf(&hello, "NICK justinfan12345\r\nJOIN #%s\r\n", r->channel);
 	send(fd, hello.array, hello.len, MSG_NOSIGNAL);
 	dstr_free(&hello);
-	blog(LOG_INFO, "[twitch-tts] reading #%s", channel);
+	blog(LOG_INFO, "[twitch-tts] reading #%s with %s, speaker %lld", r->channel, r->model, r->speaker);
+	voice_start(r);
 
 	char buf[4096];
 	size_t len = 0;
-	while (!halted(t, gen)) {
+	while (!halted(r)) {
 		ssize_t n = recv(fd, buf + len, sizeof(buf) - 1 - len, 0);
 		if (n < 0 && (errno == EAGAIN || errno == EINTR))
 			continue;
@@ -179,7 +214,7 @@ static void session(struct tts *t, long gen, const char *channel)
 		char *l = buf, *e;
 		while ((e = strstr(l, "\r\n"))) {
 			*e = '\0';
-			line(t, gen, fd, l);
+			line(r, fd, l);
 			l = e + 2;
 		}
 		len -= (size_t)(l - buf);
@@ -187,9 +222,10 @@ static void session(struct tts *t, long gen, const char *channel)
 		if (len == sizeof(buf) - 1)
 			len = 0;
 	}
+	voice_stop(r);
 	close(fd);
-	if (!halted(t, gen))
-		blog(LOG_WARNING, "[twitch-tts] lost #%s, retrying in 5s", channel);
+	if (!halted(r))
+		blog(LOG_WARNING, "[twitch-tts] lost #%s, retrying in 5s", r->channel);
 }
 
 static void *run(void *data)
@@ -197,13 +233,19 @@ static void *run(void *data)
 	struct tts *t = data;
 	while (!os_atomic_load_bool(&t->stop)) {
 		pthread_mutex_lock(&t->lock);
-		char *channel = bstrdup(t->channel);
-		long gen = os_atomic_load_long(&t->gen);
+		struct run r = {
+			.t = t,
+			.gen = os_atomic_load_long(&t->gen),
+			.channel = bstrdup(t->channel),
+			.model = bstrdup(t->model),
+			.speaker = t->speaker,
+		};
 		pthread_mutex_unlock(&t->lock);
-		if (*channel)
-			session(t, gen, channel);
-		bfree(channel);
-		for (int i = 0; i < 50 && !halted(t, gen); i++)
+		if (*r.channel)
+			session(&r);
+		bfree(r.channel);
+		bfree(r.model);
+		for (int i = 0; i < 50 && !halted(&r); i++)
 			os_sleep_ms(100);
 	}
 	return NULL;
@@ -218,7 +260,10 @@ static void update(void *data, obs_data_t *settings)
 		*c = (char)tolower((unsigned char)*c);
 	pthread_mutex_lock(&t->lock);
 	bfree(t->channel);
+	bfree(t->model);
 	t->channel = channel;
+	t->model = bstrdup(obs_data_get_string(settings, "model"));
+	t->speaker = obs_data_get_int(settings, "speaker");
 	os_atomic_inc_long(&t->gen);
 	pthread_mutex_unlock(&t->lock);
 }
@@ -233,6 +278,7 @@ static void *create(obs_data_t *settings, obs_source_t *source)
 		blog(LOG_ERROR, "[twitch-tts] cannot start thread");
 		pthread_mutex_destroy(&t->lock);
 		bfree(t->channel);
+		bfree(t->model);
 		bfree(t);
 		return NULL;
 	}
@@ -246,7 +292,14 @@ static void destroy(void *data)
 	pthread_join(t->thread, NULL);
 	pthread_mutex_destroy(&t->lock);
 	bfree(t->channel);
+	bfree(t->model);
 	bfree(t);
+}
+
+static void defaults(obs_data_t *settings)
+{
+	obs_data_set_default_string(settings, "model", MODEL);
+	obs_data_set_default_int(settings, "speaker", 3);
 }
 
 static obs_properties_t *properties(void *data)
@@ -254,6 +307,8 @@ static obs_properties_t *properties(void *data)
 	UNUSED_PARAMETER(data);
 	obs_properties_t *props = obs_properties_create();
 	obs_properties_add_text(props, "channel", "Twitch channel", OBS_TEXT_DEFAULT);
+	obs_properties_add_path(props, "model", "Model directory", OBS_PATH_DIRECTORY, NULL, MODEL);
+	obs_properties_add_int(props, "speaker", "Speaker ID", 0, 9999, 1);
 	return props;
 }
 
@@ -272,6 +327,7 @@ static struct obs_source_info source = {
 	.create = create,
 	.destroy = destroy,
 	.update = update,
+	.get_defaults = defaults,
 	.get_properties = properties,
 };
 
