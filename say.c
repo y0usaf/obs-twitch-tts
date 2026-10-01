@@ -40,8 +40,8 @@ static char *first_onnx(const char *dir)
 
 int main(int argc, char **argv)
 {
-	if (argc != 3) {
-		fprintf(stderr, "usage: %s MODEL_DIR SPEAKER_ID\n", argv[0]);
+	if (argc != 2) {
+		fprintf(stderr, "usage: %s MODEL_DIR\n", argv[0]);
 		return 2;
 	}
 	const char *dir = argv[1];
@@ -71,12 +71,15 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	SherpaOnnxGenerationConfig g = {.silence_scale = 0.2f, .speed = 1.0f, .sid = atoi(argv[2])};
+	SherpaOnnxGenerationConfig g = {.silence_scale = 0.2f, .speed = 1.0f};
 	char *line = NULL;
 	size_t cap = 0;
 	while (getline(&line, &cap, stdin) > 0) {
 		line[strcspn(line, "\n")] = '\0';
-		const SherpaOnnxGeneratedAudio *a = SherpaOnnxOfflineTtsGenerateWithConfig(tts, line, &g, NULL, NULL);
+		char *text;
+		g.sid = (int32_t)strtol(line, &text, 10);
+		const SherpaOnnxGeneratedAudio *a =
+			SherpaOnnxOfflineTtsGenerateWithConfig(tts, text + (*text == ' '), &g, NULL, NULL);
 		uint32_t head[2] = {a ? (uint32_t)a->sample_rate : 0, a ? (uint32_t)a->n : 0};
 		fwrite(head, sizeof(head), 1, stdout);
 		if (a) {

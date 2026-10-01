@@ -18,6 +18,8 @@
 #define NS 1000000000ULL
 #define LEAD (NS / 20)
 #define BUDGET (30 * NS)
+#define MAX_VOICES 1024
+#define VOICES "0-3,5-7,9,14,16,18,21,22,25,26"
 
 OBS_DECLARE_MODULE()
 
@@ -29,7 +31,7 @@ struct tts {
 	pthread_mutex_t lock;
 	char *channel;
 	char *model;
-	long long speaker;
+	char *voices;
 	volatile long gen;
 	volatile bool stop;
 };
@@ -39,10 +41,45 @@ struct run {
 	long gen;
 	char *channel;
 	char *model;
-	long long speaker;
+	long voices[MAX_VOICES];
+	size_t nvoices;
+	char *last;
 	pid_t pid;
 	int voice;
 };
+
+static size_t parse_voices(const char *s, long *out)
+{
+	size_t n = 0;
+	while (*s && n < MAX_VOICES) {
+		char *end;
+		long a = strtol(s, &end, 10), b = a;
+		if (end == s) {
+			s++;
+			continue;
+		}
+		if (*end == '-') {
+			s = end + 1;
+			b = strtol(s, &end, 10);
+			if (end == s)
+				b = a;
+		}
+		for (long v = a; v <= b && n < MAX_VOICES; v++)
+			out[n++] = v;
+		s = end;
+	}
+	return n;
+}
+
+static long voice_for(struct run *r, const char *nick)
+{
+	if (!r->nvoices)
+		return 0;
+	uint32_t h = 2166136261u;
+	for (const char *c = nick; *c; c++)
+		h = (h ^ (uint8_t)*c) * 16777619u;
+	return r->voices[h % r->nvoices];
+}
 
 static bool halted(struct run *r)
 {
@@ -58,9 +95,7 @@ static bool voice_start(struct run *r)
 	posix_spawn_file_actions_init(&fa);
 	posix_spawn_file_actions_adddup2(&fa, sv[1], STDIN_FILENO);
 	posix_spawn_file_actions_adddup2(&fa, sv[1], STDOUT_FILENO);
-	char speaker[24];
-	snprintf(speaker, sizeof(speaker), "%lld", r->speaker);
-	char *argv[] = {SAY, r->model, speaker, NULL};
+	char *argv[] = {SAY, r->model, NULL};
 	int err = posix_spawn(&r->pid, SAY, &fa, NULL, argv, environ);
 	posix_spawn_file_actions_destroy(&fa);
 	close(sv[1]);
@@ -120,12 +155,12 @@ static void play(struct run *r, const float *pcm, size_t frames, uint32_t rate)
 	os_sleepto_ns(start + (off < frames ? off : frames) * NS / rate);
 }
 
-static void say(struct run *r, const char *text)
+static void say(struct run *r, long voice, const char *text)
 {
 	if (!r->pid && !voice_start(r))
 		return;
 	struct dstr line = {0};
-	dstr_printf(&line, "%s\n", text);
+	dstr_printf(&line, "%ld %s\n", voice, text);
 	bool sent = send(r->voice, line.array, line.len, MSG_NOSIGNAL) == (ssize_t)line.len;
 	dstr_free(&line);
 
@@ -161,9 +196,15 @@ static void line(struct run *r, int fd, char *l)
 	if (*l != ':' || !bang || !msg || bang > cmd)
 		return;
 	*bang = '\0';
+	const char *nick = l + 1;
 	struct dstr text = {0};
-	dstr_printf(&text, "%s says %s", l + 1, msg + 2);
-	say(r, text.array);
+	if (r->last && !strcmp(r->last, nick))
+		dstr_copy(&text, msg + 2);
+	else
+		dstr_printf(&text, "%s says %s", nick, msg + 2);
+	bfree(r->last);
+	r->last = bstrdup(nick);
+	say(r, voice_for(r, nick), text.array);
 	dstr_free(&text);
 }
 
@@ -198,7 +239,7 @@ static void session(struct run *r)
 	dstr_printf(&hello, "NICK justinfan12345\r\nJOIN #%s\r\n", r->channel);
 	send(fd, hello.array, hello.len, MSG_NOSIGNAL);
 	dstr_free(&hello);
-	blog(LOG_INFO, "[twitch-tts] reading #%s with %s, speaker %lld", r->channel, r->model, r->speaker);
+	blog(LOG_INFO, "[twitch-tts] reading #%s with %s, %zu voices", r->channel, r->model, r->nvoices);
 	voice_start(r);
 
 	char buf[4096];
@@ -232,19 +273,18 @@ static void *run(void *data)
 {
 	struct tts *t = data;
 	while (!os_atomic_load_bool(&t->stop)) {
+		struct run r = {.t = t};
 		pthread_mutex_lock(&t->lock);
-		struct run r = {
-			.t = t,
-			.gen = os_atomic_load_long(&t->gen),
-			.channel = bstrdup(t->channel),
-			.model = bstrdup(t->model),
-			.speaker = t->speaker,
-		};
+		r.gen = os_atomic_load_long(&t->gen);
+		r.channel = bstrdup(t->channel);
+		r.model = bstrdup(t->model);
+		r.nvoices = parse_voices(t->voices, r.voices);
 		pthread_mutex_unlock(&t->lock);
 		if (*r.channel)
 			session(&r);
 		bfree(r.channel);
 		bfree(r.model);
+		bfree(r.last);
 		for (int i = 0; i < 50 && !halted(&r); i++)
 			os_sleep_ms(100);
 	}
@@ -261,9 +301,10 @@ static void update(void *data, obs_data_t *settings)
 	pthread_mutex_lock(&t->lock);
 	bfree(t->channel);
 	bfree(t->model);
+	bfree(t->voices);
 	t->channel = channel;
 	t->model = bstrdup(obs_data_get_string(settings, "model"));
-	t->speaker = obs_data_get_int(settings, "speaker");
+	t->voices = bstrdup(obs_data_get_string(settings, "voices"));
 	os_atomic_inc_long(&t->gen);
 	pthread_mutex_unlock(&t->lock);
 }
@@ -279,6 +320,7 @@ static void *create(obs_data_t *settings, obs_source_t *source)
 		pthread_mutex_destroy(&t->lock);
 		bfree(t->channel);
 		bfree(t->model);
+		bfree(t->voices);
 		bfree(t);
 		return NULL;
 	}
@@ -293,13 +335,14 @@ static void destroy(void *data)
 	pthread_mutex_destroy(&t->lock);
 	bfree(t->channel);
 	bfree(t->model);
+	bfree(t->voices);
 	bfree(t);
 }
 
 static void defaults(obs_data_t *settings)
 {
 	obs_data_set_default_string(settings, "model", MODEL);
-	obs_data_set_default_int(settings, "speaker", 3);
+	obs_data_set_default_string(settings, "voices", VOICES);
 }
 
 static obs_properties_t *properties(void *data)
@@ -308,7 +351,8 @@ static obs_properties_t *properties(void *data)
 	obs_properties_t *props = obs_properties_create();
 	obs_properties_add_text(props, "channel", "Twitch channel", OBS_TEXT_DEFAULT);
 	obs_properties_add_path(props, "model", "Model directory", OBS_PATH_DIRECTORY, NULL, MODEL);
-	obs_properties_add_int(props, "speaker", "Speaker ID", 0, 9999, 1);
+	obs_property_t *voices = obs_properties_add_text(props, "voices", "Voices", OBS_TEXT_DEFAULT);
+	obs_property_set_long_description(voices, "Speaker IDs like 3 or 0-27 or 2,3,16. Each chatter keeps one of them.");
 	return props;
 }
 
