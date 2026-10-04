@@ -48,6 +48,7 @@ struct run {
 	char *model;
 	long voices[MAX_VOICES];
 	size_t nvoices;
+	obs_data_t *rerolls;
 	char *last;
 	pid_t pid;
 	int voice;
@@ -80,10 +81,48 @@ static long voice_for(struct run *r, const char *nick)
 {
 	if (!r->nvoices)
 		return 0;
+	if (obs_data_has_user_value(r->rerolls, nick)) {
+		long chosen = (long)obs_data_get_int(r->rerolls, nick);
+		for (size_t i = 0; i < r->nvoices; i++)
+			if (r->voices[i] == chosen)
+				return chosen;
+	}
 	uint32_t h = 2166136261u;
 	for (const char *c = nick; *c; c++)
 		h = (h ^ (uint8_t)*c) * 16777619u;
 	return r->voices[h % r->nvoices];
+}
+
+static pthread_mutex_t rerolls_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static obs_data_t *rerolls_load(void)
+{
+	char *path = obs_module_config_path("rerolls.json");
+	obs_data_t *rerolls = obs_data_create_from_json_file(path);
+	bfree(path);
+	return rerolls ? rerolls : obs_data_create();
+}
+
+static long reroll(struct run *r, const char *nick)
+{
+	if (r->nvoices < 2)
+		return -1;
+	long now = voice_for(r, nick);
+	size_t i = 0;
+	while (i < r->nvoices && r->voices[i] != now)
+		i++;
+	long voice = r->voices[(i + 1 + os_gettime_ns() % (r->nvoices - 1)) % r->nvoices];
+	char *dir = obs_module_config_path(""), *path = obs_module_config_path("rerolls.json");
+	pthread_mutex_lock(&rerolls_lock);
+	obs_data_release(r->rerolls);
+	r->rerolls = rerolls_load();
+	obs_data_set_int(r->rerolls, nick, voice);
+	if (os_mkdirs(dir) == MKDIR_ERROR || !obs_data_save_json_pretty_safe(r->rerolls, path, "tmp", NULL))
+		blog(LOG_WARNING, "[twitch-tts] cannot save %s", path);
+	pthread_mutex_unlock(&rerolls_lock);
+	bfree(dir);
+	bfree(path);
+	return voice;
 }
 
 static bool halted(struct run *r)
@@ -246,18 +285,28 @@ static void line(struct run *r, int fd, char *l)
 		return;
 	*bang = '\0';
 	const char *nick = l + 1;
+	char *body = msg + 2;
+	long voice;
 	struct dstr text = {0};
-	if (!r->last || strcmp(r->last, nick))
-		dstr_printf(&text, "%s says", nick);
-	size_t head = text.len;
-	drop_links(&text, msg + 2);
-	if (text.len == head) {
-		dstr_free(&text);
-		return;
+	if (!strncasecmp(body, "!reroll", 7) && (!body[7] || body[7] == ' ')) {
+		voice = reroll(r, nick);
+		if (voice < 0)
+			return;
+		dstr_printf(&text, "%s has a new voice", nick);
+	} else {
+		voice = voice_for(r, nick);
+		if (!r->last || strcmp(r->last, nick))
+			dstr_printf(&text, "%s says", nick);
+		size_t head = text.len;
+		drop_links(&text, body);
+		if (text.len == head) {
+			dstr_free(&text);
+			return;
+		}
 	}
 	bfree(r->last);
 	r->last = bstrdup(nick);
-	say(r, voice_for(r, nick), text.array);
+	say(r, voice, text.array);
 	dstr_free(&text);
 }
 
@@ -333,8 +382,11 @@ static void *run(void *data)
 		r.model = bstrdup(t->model);
 		r.nvoices = parse_voices(t->voices, r.voices);
 		pthread_mutex_unlock(&t->lock);
-		if (*r.channel)
+		if (*r.channel) {
+			r.rerolls = rerolls_load();
 			session(&r);
+			obs_data_release(r.rerolls);
+		}
 		bfree(r.channel);
 		bfree(r.model);
 		bfree(r.last);

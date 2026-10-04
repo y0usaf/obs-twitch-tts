@@ -5,7 +5,8 @@ a local neural voice.
 
 It won't log in, post or moderate, and it doesn't download models. It
 reads every chat line in order as "<user> says <message>", dropping the
-name when the same person speaks again and leaving out links.
+name when the same person speaks again and leaving out links. `!reroll`
+isn't read; it gives the sender a new voice.
 
 ## Use
 
@@ -30,6 +31,13 @@ and the default list, `0-3,5-7,9,14,16,18,21,22,25,26`, is every English
 voice rated C or better in Kokoro's VOICES.md. In that model 0-10 are
 American female, 11-19 American male, 20-23 British female and 24-27
 British male. A single number gives everyone the same voice.
+
+A chatter who sends `!reroll` gets a different voice from **Voices**,
+announced in that voice, and keeps it. Rerolled voices are saved as
+`{"login": speaker}` in `rerolls.json` in the plugin's config directory
+(`~/.config/obs-studio/plugin_config/twitch-tts/` on Linux); edit it to
+give someone a particular voice. The input rereads it when it connects. A
+saved voice that is no longer in **Voices** falls back to the hash.
 
 A word counts as a link if it contains `://`, starts with `www.`, looks
 like `name.tld/path`, or is a bare `name.tld` with a TLD common in chat
