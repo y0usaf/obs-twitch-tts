@@ -12,6 +12,7 @@
 #include <signal.h>
 #include <spawn.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -26,6 +27,8 @@
 OBS_DECLARE_MODULE()
 
 extern char **environ;
+
+static const char *const tlds[] = {"ai", "app", "co", "com", "de", "dev", "gg", "io", "ly", "net", "org", "ru", "tv", "uk", "xyz"};
 
 struct tts {
 	obs_source_t *source;
@@ -184,6 +187,50 @@ static void say(struct run *r, long voice, const char *text)
 	bfree(pcm);
 }
 
+static bool is_link(const char *w)
+{
+	if (strstr(w, "://") || !strncasecmp(w, "www.", 4))
+		return true;
+	while (*w && !isalnum((unsigned char)*w))
+		w++;
+	const char *end = w + strcspn(w, "/?#"), *tld = NULL;
+	bool path = *end == '/';
+	while (end > w && !isalnum((unsigned char)end[-1]))
+		end--;
+	for (const char *c = w; c < end; c++) {
+		if (*c == '.' && c[-1] != '.')
+			tld = c + 1;
+		else if (!isalnum((unsigned char)*c) && *c != '-')
+			return false;
+	}
+	if (!tld)
+		return false;
+	size_t n = (size_t)(end - tld);
+	for (size_t i = 0; i < n; i++)
+		if (!isalpha((unsigned char)tld[i]))
+			return false;
+	if (n < 2)
+		return false;
+	if (path)
+		return true;
+	for (size_t i = 0; i < sizeof(tlds) / sizeof(*tlds); i++)
+		if (strlen(tlds[i]) == n && !strncasecmp(tlds[i], tld, n))
+			return true;
+	return false;
+}
+
+static void drop_links(struct dstr *out, char *text)
+{
+	char *save = NULL;
+	for (char *w = strtok_r(text, " ", &save); w; w = strtok_r(NULL, " ", &save)) {
+		if (is_link(w))
+			continue;
+		if (out->len)
+			dstr_cat_ch(out, ' ');
+		dstr_cat(out, w);
+	}
+}
+
 static void line(struct run *r, int fd, char *l)
 {
 	if (!strncmp(l, "PING ", 5)) {
@@ -200,10 +247,14 @@ static void line(struct run *r, int fd, char *l)
 	*bang = '\0';
 	const char *nick = l + 1;
 	struct dstr text = {0};
-	if (r->last && !strcmp(r->last, nick))
-		dstr_copy(&text, msg + 2);
-	else
-		dstr_printf(&text, "%s says %s", nick, msg + 2);
+	if (!r->last || strcmp(r->last, nick))
+		dstr_printf(&text, "%s says", nick);
+	size_t head = text.len;
+	drop_links(&text, msg + 2);
+	if (text.len == head) {
+		dstr_free(&text);
+		return;
+	}
 	bfree(r->last);
 	r->last = bstrdup(nick);
 	say(r, voice_for(r, nick), text.array);

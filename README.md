@@ -3,9 +3,9 @@
 An OBS global audio input that reads one Twitch channel's chat aloud with
 a local neural voice.
 
-It won't log in, post, filter or skip messages, and it doesn't download
-models. It reads every chat line in order as "<user> says <message>",
-dropping the name when the same person speaks again.
+It won't log in, post or moderate, and it doesn't download models. It
+reads every chat line in order as "<user> says <message>", dropping the
+name when the same person speaks again and leaving out links.
 
 ## Use
 
@@ -30,6 +30,11 @@ and the default list, `0-3,5-7,9,14,16,18,21,22,25,26`, is every English
 voice rated C or better in Kokoro's VOICES.md. In that model 0-10 are
 American female, 11-19 American male, 20-23 British female and 24-27
 British male. A single number gives everyone the same voice.
+
+A word counts as a link if it contains `://`, starts with `www.`, looks
+like `name.tld/path`, or is a bare `name.tld` with a TLD common in chat
+(`.com`, `.tv`, `.gg`, `.io` and a few more). A message that is only
+links isn't read at all.
 
 To use another model, point **Model directory** at any Kokoro or Piper
 (`vits-piper-*`) directory from sherpa-onnx's
