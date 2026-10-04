@@ -1,5 +1,5 @@
 {
-  description = "OBS audio source that reads Twitch chat aloud";
+  description = "OBS global audio input that reads Twitch chat aloud";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -18,7 +18,7 @@
         $CC -shared -fPIC -O2 -Wall -Wextra -Werror \
           -I${pkgs.obs-studio}/include/obs \
           -DSAY="\"$out/bin/twitch-tts-say\"" -DMODEL='"${kokoro}"' \
-          -o $out/lib/obs-plugins/twitch-tts.so ${./twitch-tts.c} -lobs
+          -o $out/lib/obs-plugins/twitch-tts.so ${./twitch-tts.c} -lobs -lobs-frontend-api
       '';
     });
   };

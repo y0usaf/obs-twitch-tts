@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <obs-module.h>
+#include <obs-frontend-api.h>
 #include <util/dstr.h>
 #include <util/platform.h>
 #include <util/threading.h>
@@ -19,6 +20,7 @@
 #define LEAD (NS / 20)
 #define BUDGET (30 * NS)
 #define MAX_VOICES 1024
+#define ID "twitch_chat_tts"
 #define VOICES "0-3,5-7,9,14,16,18,21,22,25,26"
 
 OBS_DECLARE_MODULE()
@@ -356,6 +358,36 @@ static obs_properties_t *properties(void *data)
 	return props;
 }
 
+static uint32_t global_channel(void)
+{
+	uint32_t channel = 0;
+	for (uint32_t i = 0; i < MAX_CHANNELS; i++) {
+		obs_source_t *input = obs_get_output_source(i);
+		if (!input) {
+			if (!channel && i >= 7)
+				channel = i;
+			continue;
+		}
+		bool exists = !strcmp(obs_source_get_unversioned_id(input), ID);
+		obs_source_release(input);
+		if (exists)
+			return 0;
+	}
+	if (!channel)
+		blog(LOG_WARNING, "[twitch-tts] no free global audio channel");
+	return channel;
+}
+
+static void load(void *data, obs_data_t *settings)
+{
+	if (!obs_data_get_bool(settings, "global"))
+		return;
+	struct tts *t = data;
+	uint32_t channel = global_channel();
+	if (channel)
+		obs_set_output_source(channel, t->source);
+}
+
 static const char *name(void *data)
 {
 	UNUSED_PARAMETER(data);
@@ -363,20 +395,65 @@ static const char *name(void *data)
 }
 
 static struct obs_source_info source = {
-	.id = "twitch_chat_tts",
+	.id = ID,
 	.type = OBS_SOURCE_TYPE_INPUT,
-	.output_flags = OBS_SOURCE_AUDIO,
+	.output_flags = OBS_SOURCE_AUDIO | OBS_SOURCE_CAP_DISABLED,
 	.icon_type = OBS_ICON_TYPE_AUDIO_OUTPUT,
 	.get_name = name,
 	.create = create,
 	.destroy = destroy,
 	.update = update,
+	.load = load,
 	.get_defaults = defaults,
 	.get_properties = properties,
 };
 
+static bool legacy_input(void *data, obs_source_t *input)
+{
+	if (strcmp(obs_source_get_unversioned_id(input), ID))
+		return true;
+	obs_data_t *settings = obs_source_get_settings(input);
+	bool legacy = !obs_data_get_bool(settings, "global");
+	obs_data_release(settings);
+	bool *exists = data;
+	*exists = legacy;
+	return !legacy;
+}
+
+static void frontend_event(enum obs_frontend_event event, void *data)
+{
+	UNUSED_PARAMETER(data);
+	if (event != OBS_FRONTEND_EVENT_FINISHED_LOADING && event != OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED)
+		return;
+	uint32_t channel = global_channel();
+	if (!channel)
+		return;
+	bool legacy = false;
+	obs_enum_sources(legacy_input, &legacy);
+	if (legacy) {
+		blog(LOG_WARNING, "[twitch-tts] remove existing scene TTS sources and reload the collection to enable the global input");
+		return;
+	}
+	obs_data_t *settings = obs_data_create();
+	obs_data_set_bool(settings, "global", true);
+	obs_source_t *input = obs_source_create(source.id, name(NULL), settings, NULL);
+	obs_data_release(settings);
+	if (!input) {
+		blog(LOG_ERROR, "[twitch-tts] cannot create global audio input");
+		return;
+	}
+	obs_set_output_source(channel, input);
+	obs_source_release(input);
+}
+
 bool obs_module_load(void)
 {
 	obs_register_source(&source);
+	obs_frontend_add_event_callback(frontend_event, NULL);
 	return true;
+}
+
+void obs_module_unload(void)
+{
+	obs_frontend_remove_event_callback(frontend_event, NULL);
 }

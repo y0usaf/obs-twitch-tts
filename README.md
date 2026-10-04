@@ -1,7 +1,7 @@
 # obs-twitch-tts
 
-An OBS audio source that reads one Twitch channel's chat aloud with a local
-neural voice.
+An OBS global audio input that reads one Twitch channel's chat aloud with
+a local neural voice.
 
 It won't log in, post, filter or skip messages, and it doesn't download
 models. It reads every chat line in order as "<user> says <message>",
@@ -9,9 +9,20 @@ dropping the name when the same person speaks again.
 
 ## Use
 
-Add a **Twitch Chat TTS** source and set its channel. The source is plain
-audio: set Audio Monitoring in Advanced Audio Properties if you want to
-hear it yourself.
+**Twitch Chat TTS** appears automatically in the Audio Mixer. Open its
+**Properties** to set the channel. It stays active across scenes and
+never adds scene items. Set Audio Monitoring in Advanced Audio Properties
+if you want to hear it yourself.
+
+Its settings, volume, mute and filters are saved with the scene collection.
+It uses a free global channel outside OBS's six desktop/microphone slots,
+so it leaves your audio devices alone. It isn't listed in the scene source
+menu.
+
+For an existing scene-source setup, note its channel, model and voices,
+remove the old TTS sources from your scenes, then reload the scene
+collection and configure the new mixer input. Until then, the plugin
+leaves the old sources alone and does not add a second reader.
 
 Each chatter gets one voice from **Voices**, picked by a hash of their name,
 so regulars keep theirs across streams. The default model is Kokoro v1.0
@@ -29,7 +40,7 @@ else as VITS. Its first `*.onnx` file is the model.
 ## How
 
 Chat comes in over anonymous plaintext IRC (`irc.chat.twitch.tv:6667`, nick
-`justinfan12345`). Each source keeps one `twitch-tts-say MODEL_DIR` process,
+`justinfan12345`). The input keeps one `twitch-tts-say MODEL_DIR` process,
 which loads the model once and then turns each `SPEAKER TEXT` line on
 stdin into `u32 rate, u32 frames, f32 samples[frames]` on stdout. It runs
 outside OBS because the phonemizer (espeak-ng) parses untrusted chat text.
@@ -45,7 +56,7 @@ pkgs.wrapOBS { plugins = [ obs-twitch-tts.packages.${system}.default ]; }
 ```
 
 `nix build` produces `lib/obs-plugins/twitch-tts.so`, which links only
-libobs and libc, and `bin/twitch-tts-say`, which links sherpa-onnx. The
-default model is fetched into the store at build time.
+libobs, the OBS frontend API and libc, and `bin/twitch-tts-say`, which links
+sherpa-onnx. The default model is fetched into the store at build time.
 
 GPL-2.0-or-later, like libobs.
