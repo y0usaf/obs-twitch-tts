@@ -310,6 +310,82 @@ static void drop_links(struct dstr *out, char *text)
 	}
 }
 
+static uint32_t peek(const char *s, const char **next)
+{
+	const unsigned char *u = (const unsigned char *)s;
+	int n = u[0] < 0x80 ? 0 : u[0] >= 0xF0 ? 3 : u[0] >= 0xE0 ? 2 : u[0] >= 0xC0 ? 1 : -1;
+	uint32_t c = n > 0 ? u[0] & (0x3F >> n) : u[0];
+	for (int i = 1; i <= n; i++) {
+		if ((u[i] & 0xC0) != 0x80) {
+			n = 0;
+			c = u[0];
+			break;
+		}
+		c = c << 6 | (u[i] & 0x3F);
+	}
+	*next = s + (n > 0 ? n + 1 : 1);
+	return c;
+}
+
+static bool is_emoji(uint32_t c)
+{
+	return (c >= 0x1F000 && c <= 0x1FAFF) || (c >= 0x2600 && c <= 0x27BF) || c == 0x231A ||
+	       c == 0x231B || (c >= 0x23E9 && c <= 0x23FA) || (c >= 0x2B05 && c <= 0x2B07) ||
+	       c == 0x2B1B || c == 0x2B1C || c == 0x2B50 || c == 0x2B55 || c == 0x3030 || c == 0x303D ||
+	       c == 0x3297 || c == 0x3299;
+}
+
+/* Variation selectors, skin tones, keycaps and flag tags belong to the emoji before them. */
+static bool is_modifier(uint32_t c)
+{
+	return c == 0xFE0E || c == 0xFE0F || c == 0x20E3 || (c >= 0x1F3FB && c <= 0x1F3FF) ||
+	       (c >= 0xE0020 && c <= 0xE007F);
+}
+
+/* End of the emoji starting at s (a ZWJ sequence or flag counts as one), or NULL. */
+static const char *emoji_end(const char *s)
+{
+	const char *p;
+	uint32_t c = peek(s, &p), m;
+	const char *q;
+	if (!*s || (!is_emoji(c) && !is_modifier(peek(p, &q))))
+		return NULL;
+	if (c >= 0x1F1E6 && c <= 0x1F1FF && (m = peek(p, &q)) >= 0x1F1E6 && m <= 0x1F1FF)
+		p = q;
+	for (;;) {
+		m = peek(p, &q);
+		if (*p && is_modifier(m))
+			p = q;
+		else if (m == 0x200D && *q)
+			peek(q, &p);
+		else
+			return p;
+	}
+}
+
+/* The voice reads an emoji as its name, so "🌮" sounds like "taco". Say "emoji" after each
+ * run of them, so a chatter's "🌮" is heard as "taco emoji". */
+static void mark_emoji(struct dstr *out, const char *s)
+{
+	while (*s) {
+		const char *end = emoji_end(s);
+		if (!end) {
+			const char *next;
+			peek(s, &next);
+			dstr_ncat(out, s, next - s);
+			s = next;
+			continue;
+		}
+		if (out->len && out->array[out->len - 1] != ' ')
+			dstr_cat_ch(out, ' ');
+		for (const char *e; (e = emoji_end(end));)
+			end = e;
+		dstr_ncat(out, s, end - s);
+		dstr_cat(out, " emoji ");
+		s = end;
+	}
+}
+
 static void line(struct run *r, int fd, char *l)
 {
 	if (!strncmp(l, "PING ", 5)) {
@@ -338,7 +414,11 @@ static void line(struct run *r, int fd, char *l)
 		if (!r->last || strcmp(r->last, nick))
 			dstr_printf(&text, "%s says", nick);
 		size_t head = text.len;
-		drop_links(&text, body);
+		struct dstr marked = {0};
+		mark_emoji(&marked, body);
+		if (marked.array)
+			drop_links(&text, marked.array);
+		dstr_free(&marked);
 		if (text.len == head) {
 			dstr_free(&text);
 			return;

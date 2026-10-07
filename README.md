@@ -5,8 +5,9 @@ a local neural voice.
 
 It won't log in, post or moderate, and it doesn't download models. It
 reads every chat line in order as "<user> says <message>", dropping the
-name when the same person speaks again and leaving out links. `!reroll`
-isn't read; it gives the sender a new voice.
+name when the same person speaks again and leaving out links. Emoji are
+read by name with "emoji" after them, so 🌮 is heard as "taco emoji".
+`!reroll` isn't read; it gives the sender a new voice.
 
 ## Use
 
@@ -50,6 +51,13 @@ A word counts as a link if it contains `://`, starts with `www.`, looks
 like `name.tld/path`, or is a bare `name.tld` with a TLD common in chat
 (`.com`, `.tv`, `.gg`, `.io` and a few more). A message that is only
 links isn't read at all.
+
+The voice reads an emoji as its name, which sounds just like the word, so
+the plugin says "emoji" after each one: "hi 🌮" is read "hi taco emoji".
+Emoji right next to each other share one "emoji" (🌮🌮🌮 ends in a single
+"emoji"); spaced-out ones each get their own. Skin tones, flags and joined
+emoji like 👨‍👩‍👧 count as one. Twitch emotes such as `Kappa` are plain words
+and are read as before.
 
 To use another model, point **Model directory** at any Kokoro or Piper
 (`vits-piper-*`) directory from sherpa-onnx's
