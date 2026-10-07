@@ -7,6 +7,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <math.h>
 #include <netdb.h>
 #include <poll.h>
 #include <signal.h>
@@ -23,6 +24,10 @@
 #define MAX_VOICES 1024
 #define ID "twitch_chat_tts"
 #define VOICES "0-3,5-7,9,14,16,18,21,22,25,26"
+#define TARGET 0.1    /* speech RMS, -20 dBFS: Kokoro's loudest English voices */
+#define CEILING 0.89  /* peak, -1 dBFS */
+#define GATE 0.001    /* 20 ms blocks quieter than -60 dBFS are pauses */
+#define MAX_GAIN 4.0  /* +12 dB */
 
 OBS_DECLARE_MODULE()
 
@@ -179,6 +184,39 @@ static bool recv_all(struct run *r, void *buf, size_t n, uint64_t deadline)
 	return true;
 }
 
+/* Scale one message so its speech, pauses left out, has RMS TARGET, unless
+ * that would push a peak past CEILING or need more than MAX_GAIN. */
+static void normalize(float *pcm, size_t frames, uint32_t rate)
+{
+	size_t block = rate / 50 ? rate / 50 : 1, counted = 0;
+	double sum = 0, peak = 0;
+	for (size_t off = 0; off < frames; off += block) {
+		size_t n = frames - off < block ? frames - off : block;
+		double e = 0;
+		for (size_t i = 0; i < n; i++) {
+			double x = pcm[off + i];
+			e += x * x;
+			if (fabs(x) > peak)
+				peak = fabs(x);
+		}
+		if (e > GATE * GATE * (double)n) {
+			sum += e;
+			counted += n;
+		}
+	}
+	if (!counted)
+		return;
+	double gain = TARGET / sqrt(sum / (double)counted);
+	if (gain * peak > CEILING)
+		gain = CEILING / peak;
+	if (gain > MAX_GAIN)
+		gain = MAX_GAIN;
+	if (!isfinite(gain))
+		return;
+	for (size_t i = 0; i < frames; i++)
+		pcm[i] = (float)(pcm[i] * gain);
+}
+
 static void play(struct run *r, const float *pcm, size_t frames, uint32_t rate)
 {
 	size_t chunk = rate / 50, off = 0;
@@ -219,8 +257,10 @@ static void say(struct run *r, long voice, const char *text)
 	if (!head[0] || !head[1])
 		return;
 	float *pcm = bmalloc((size_t)head[1] * sizeof(float));
-	if (recv_all(r, pcm, (size_t)head[1] * sizeof(float), deadline))
+	if (recv_all(r, pcm, (size_t)head[1] * sizeof(float), deadline)) {
+		normalize(pcm, head[1], head[0]);
 		play(r, pcm, head[1], head[0]);
+	}
 	else
 		voice_stop(r);
 	bfree(pcm);

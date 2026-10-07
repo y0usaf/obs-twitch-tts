@@ -39,6 +39,13 @@ announced in that voice, and keeps it. Rerolled voices are saved as
 give someone a particular voice. The input rereads it when it connects. A
 saved voice that is no longer in **Voices** falls back to the hash.
 
+Every message is brought to the same loudness before it plays, so quiet
+voices aren't drowned out by loud ones. The plugin measures the speech
+(pauses left out) and scales it to -20 dBFS RMS, about as loud as the
+loudest Kokoro voices already are, but never past a -1 dBFS peak or
+more than +12 dB of gain. Pitch and voice are untouched. Set the overall
+level with the mixer fader as usual.
+
 A word counts as a link if it contains `://`, starts with `www.`, looks
 like `name.tld/path`, or is a bare `name.tld` with a TLD common in chat
 (`.com`, `.tv`, `.gg`, `.io` and a few more). A message that is only
@@ -69,7 +76,7 @@ pkgs.wrapOBS { plugins = [ obs-twitch-tts.packages.${system}.default ]; }
 ```
 
 `nix build` produces `lib/obs-plugins/twitch-tts.so`, which links only
-libobs, the OBS frontend API and libc, and `bin/twitch-tts-say`, which links
+libobs, the OBS frontend API, libm and libc, and `bin/twitch-tts-say`, which links
 sherpa-onnx. The default model is fetched into the store at build time.
 
 GPL-2.0-or-later, like libobs.

@@ -18,7 +18,7 @@
         $CC -shared -fPIC -O2 -Wall -Wextra -Werror \
           -I${pkgs.obs-studio}/include/obs \
           -DSAY="\"$out/bin/twitch-tts-say\"" -DMODEL='"${kokoro}"' \
-          -o $out/lib/obs-plugins/twitch-tts.so ${./twitch-tts.c} -lobs -lobs-frontend-api
+          -o $out/lib/obs-plugins/twitch-tts.so ${./twitch-tts.c} -lobs -lobs-frontend-api -lm
       '';
     });
   };
