@@ -24,10 +24,10 @@
 #define MAX_VOICES 1024
 #define ID "twitch_chat_tts"
 #define VOICES "0-3,5-7,9,14,16,18,21,22,25,26"
-#define TARGET 0.1    /* speech RMS, -20 dBFS: Kokoro's loudest English voices */
-#define CEILING 0.89  /* peak, -1 dBFS */
-#define GATE 0.001    /* 20 ms blocks quieter than -60 dBFS are pauses */
-#define MAX_GAIN 4.0  /* +12 dB */
+#define TARGET 0.1   
+#define CEILING 0.89 
+#define GATE 0.001   
+#define MAX_GAIN 4.0 
 
 OBS_DECLARE_MODULE()
 
@@ -184,8 +184,6 @@ static bool recv_all(struct run *r, void *buf, size_t n, uint64_t deadline)
 	return true;
 }
 
-/* Scale one message so its speech, pauses left out, has RMS TARGET, unless
- * that would push a peak past CEILING or need more than MAX_GAIN. */
 static void normalize(float *pcm, size_t frames, uint32_t rate)
 {
 	size_t block = rate / 50 ? rate / 50 : 1, counted = 0;
@@ -335,14 +333,12 @@ static bool is_emoji(uint32_t c)
 	       c == 0x3297 || c == 0x3299;
 }
 
-/* Variation selectors, skin tones, keycaps and flag tags belong to the emoji before them. */
 static bool is_modifier(uint32_t c)
 {
 	return c == 0xFE0E || c == 0xFE0F || c == 0x20E3 || (c >= 0x1F3FB && c <= 0x1F3FF) ||
 	       (c >= 0xE0020 && c <= 0xE007F);
 }
 
-/* End of the emoji starting at s (a ZWJ sequence or flag counts as one), or NULL. */
 static const char *emoji_end(const char *s)
 {
 	const char *p;
@@ -363,8 +359,6 @@ static const char *emoji_end(const char *s)
 	}
 }
 
-/* The voice reads an emoji as its name, so "🌮" sounds like "taco". Say "emoji" after each
- * run of them, so a chatter's "🌮" is heard as "taco emoji". */
 static void mark_emoji(struct dstr *out, const char *s)
 {
 	while (*s) {
