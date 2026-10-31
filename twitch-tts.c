@@ -24,10 +24,10 @@
 #define MAX_VOICES 1024
 #define ID "twitch_chat_tts"
 #define VOICES "0-3,5-7,9,14,16,18,21,22,25,26"
-#define TARGET 0.1   
-#define CEILING 0.89 
-#define GATE 0.001   
-#define MAX_GAIN 4.0 
+#define TARGET 0.1
+#define CEILING 0.89
+#define GATE 0.001
+#define MAX_GAIN 4.0
 
 OBS_DECLARE_MODULE()
 
